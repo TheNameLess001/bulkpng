@@ -3,3 +3,4 @@ pillow
 pandas
 requests
 openpyxl
+python-magic
