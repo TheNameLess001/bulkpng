@@ -1,10 +1,13 @@
+import streamlit as st
 import os
 import requests
 import pandas as pd
 from PIL import Image
 from io import BytesIO
 
-# 🔗 Put your links here, in order
+st.title("WEBP ➜ PNG Converter (From URLs)")
+
+# 🔗 Put your links here
 urls = [
     "https://example.com/img1.webp",
     "https://example.com/img2.webp",
@@ -16,32 +19,39 @@ os.makedirs(output_folder, exist_ok=True)
 
 results = []
 
-for url in urls:
-    try:
-        # Download file
-        print(f"Downloading: {url}")
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
+if st.button("🚀 Convert ALL"):
+    progress = st.progress(0)
+    status = st.empty()
 
-        # Create output name
-        name = url.split("/")[-1].replace(".webp", ".png")
-        output_path = os.path.join(output_folder, name)
+    for i, url in enumerate(urls):
+        try:
+            status.text(f"Downloading: {url}")
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
 
-        # Convert to PNG
-        img = Image.open(BytesIO(response.content)).convert("RGBA")
-        img.save(output_path, "PNG")
+            # Filename
+            name = url.split("/")[-1].replace(".webp", ".png")
+            output_path = os.path.join(output_folder, name)
 
-        results.append({"webp_url": url, "png_path": output_path})
-        print(f"✓ Converted → {output_path}")
+            # Convert
+            img = Image.open(BytesIO(response.content)).convert("RGBA")
+            img.save(output_path, "PNG")
 
-    except Exception as e:
-        print(f"❌ Failed for: {url} | {e}")
-        results.append({"webp_url": url, "png_path": None})
+            results.append({"webp_url": url, "png_path": output_path})
+        except Exception as e:
+            results.append({"webp_url": url, "png_path": None})
 
-# Export to CSV
-df = pd.DataFrame(results)
-df.to_csv("converted_links.csv", index=False)
+        progress.progress((i + 1) / len(urls))
 
-print("\n🎉 DONE — PNG files saved + CSV created!")
-print("📁 Folder:", output_folder)
-print("📄 CSV: converted_links.csv")
+    # dataframe output
+    df = pd.DataFrame(results)
+    df.to_csv("converted_links.csv", index=False)
+
+    st.success("🎉 Done! PNGs saved and CSV created.")
+    st.dataframe(df)
+
+    # preview of converted images
+    st.write("### 📸 Preview:")
+    for r in results:
+        if r["png_path"]:
+            st.image(r["png_path"], width=200)
