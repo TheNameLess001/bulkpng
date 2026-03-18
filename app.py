@@ -26,7 +26,7 @@ if upload_to_imgbb and not imgbb_api_key:
 # 1) INPUT SECTION
 # ------------------------------
 st.title("📝 WEBP ➜ PNG (Export & ImgBB)")
-st.markdown("L'ordre d'entrée sera **strictement respecté** dans le fichier CSV final. Le script gère intelligemment les CSV avec séparateurs `;` ou `,` et les erreurs d'encodage Excel.")
+st.markdown("L'ordre d'entrée sera **strictement respecté** dans le fichier CSV final. Gère les CSV `;` ou `,` et les erreurs Excel.")
 
 col_input1, col_input2 = st.columns(2)
 
@@ -49,34 +49,31 @@ if urls_text.strip():
 # Extraction intelligente depuis le fichier CSV ou TXT
 if uploaded_file is not None:
     if uploaded_file.name.endswith(".txt"):
-        # On tente de lire le TXT
         content = uploaded_file.read().decode("utf-8", errors="ignore")
         urls += [u.strip() for u in content.splitlines() if u.strip().startswith("http")]
     
     elif uploaded_file.name.endswith(".csv"):
-        # Liste des encodages fréquents (UTF-8 classique, puis formats Excel)
         encodings = ['utf-8', 'latin1', 'iso-8859-1', 'cp1252']
         df = None
         
         for enc in encodings:
             try:
-                uploaded_file.seek(0) # Rembobine le fichier au début
-                df_temp = pd.read_csv(uploaded_file, encoding=enc)
-                
-                # Vérification du séparateur si tout est sur une seule colonne
-                if len(df_temp.columns) == 1 and ';' in str(df_temp.columns[0]):
-                    uploaded_file.seek(0)
-                    df_temp = pd.read_csv(uploaded_file, sep=';', encoding=enc)
-                
+                uploaded_file.seek(0) # Rembobine le fichier
+                # sep=None et engine='python' demandent à Pandas de deviner le séparateur TOUT SEUL
+                df_temp = pd.read_csv(uploaded_file, encoding=enc, sep=None, engine='python')
                 df = df_temp
-                break # On sort de la boucle si la lecture a réussi sans erreur d'encodage
-            except UnicodeDecodeError:
-                continue # Passe à l'encodage suivant si ça plante
+                break # Si on arrive ici sans erreur, on a le bon format ! On sort de la boucle.
+            except (UnicodeDecodeError, pd.errors.ParserError, Exception):
+                continue # Si ça plante (encodage ou séparateur), on passe à la configuration suivante
                 
         if df is None:
-            st.error("❌ Impossible de lire le fichier CSV. Format d'encodage inconnu.")
-        else:
-            # Chercher intelligemment la colonne contenant les images
+            # Plan B : Forcer le point-virgule et ignorer les lignes qui posent problème
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, encoding='utf-8', sep=';', on_bad_lines='skip')
+            st.warning("⚠️ Certaines lignes mal formées ont dû être ignorées.")
+
+        # Chercher intelligemment la colonne contenant les images
+        if df is not None:
             url_col = None
             for col in df.columns:
                 if str(col).strip().lower() in ['image', 'url', 'lien', 'link']:
@@ -200,7 +197,7 @@ if st.button("🚀 Convertir", type="primary"):
             )
 
         with col_dl2:
-            # On exporte le résultat en utf-8 avec signature BOM pour qu'Excel l'ouvre bien sans casser les accents
+            # Format export spécial Excel Français (BOM utf-8 + séparateur point-virgule)
             csv_data = "\ufeff" + df_res.to_csv(index=False, sep=';')
             st.download_button(
                 label="📊 Télécharger la liste (CSV)",
