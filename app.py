@@ -26,7 +26,7 @@ if upload_to_imgbb and not imgbb_api_key:
 # 1) INPUT SECTION
 # ------------------------------
 st.title("📝 WEBP ➜ PNG (Export & ImgBB)")
-st.markdown("L'ordre d'entrée sera **strictement respecté** dans le fichier CSV final. Le script gère intelligemment les CSV avec séparateurs `;` ou `,`.")
+st.markdown("L'ordre d'entrée sera **strictement respecté** dans le fichier CSV final. Le script gère intelligemment les CSV avec séparateurs `;` ou `,` et les erreurs d'encodage Excel.")
 
 col_input1, col_input2 = st.columns(2)
 
@@ -49,37 +49,51 @@ if urls_text.strip():
 # Extraction intelligente depuis le fichier CSV ou TXT
 if uploaded_file is not None:
     if uploaded_file.name.endswith(".txt"):
-        content = uploaded_file.read().decode("utf-8")
+        # On tente de lire le TXT
+        content = uploaded_file.read().decode("utf-8", errors="ignore")
         urls += [u.strip() for u in content.splitlines() if u.strip().startswith("http")]
     
     elif uploaded_file.name.endswith(".csv"):
-        # On tente de lire avec la virgule
-        df = pd.read_csv(uploaded_file)
+        # Liste des encodages fréquents (UTF-8 classique, puis formats Excel)
+        encodings = ['utf-8', 'latin1', 'iso-8859-1', 'cp1252']
+        df = None
         
-        # Si ça n'a détecté qu'une seule colonne avec des points-virgules à l'intérieur, on recommence avec sep=';'
-        if len(df.columns) == 1 and ';' in df.columns[0]:
-            uploaded_file.seek(0) # On rembobine le fichier
-            df = pd.read_csv(uploaded_file, sep=';')
-            
-        # Chercher intelligemment la colonne contenant les images
-        url_col = None
-        for col in df.columns:
-            if str(col).strip().lower() in ['image', 'url', 'lien', 'link']:
-                url_col = col
-                break
-        
-        # Si on ne trouve pas explicitement, on prend la dernière colonne (souvent le cas dans ton exemple) 
-        # ou la première qui contient 'http'
-        if not url_col:
+        for enc in encodings:
+            try:
+                uploaded_file.seek(0) # Rembobine le fichier au début
+                df_temp = pd.read_csv(uploaded_file, encoding=enc)
+                
+                # Vérification du séparateur si tout est sur une seule colonne
+                if len(df_temp.columns) == 1 and ';' in str(df_temp.columns[0]):
+                    uploaded_file.seek(0)
+                    df_temp = pd.read_csv(uploaded_file, sep=';', encoding=enc)
+                
+                df = df_temp
+                break # On sort de la boucle si la lecture a réussi sans erreur d'encodage
+            except UnicodeDecodeError:
+                continue # Passe à l'encodage suivant si ça plante
+                
+        if df is None:
+            st.error("❌ Impossible de lire le fichier CSV. Format d'encodage inconnu.")
+        else:
+            # Chercher intelligemment la colonne contenant les images
+            url_col = None
             for col in df.columns:
-                if df[col].astype(str).str.contains('http').any():
+                if str(col).strip().lower() in ['image', 'url', 'lien', 'link']:
                     url_col = col
                     break
-                    
-        if url_col:
-            urls += [str(x).strip() for x in df[url_col].dropna().tolist() if str(x).strip().startswith("http")]
-        else:
-            st.error("❌ Impossible de trouver une colonne avec des URLs dans le CSV.")
+            
+            # Si pas de nom explicite, chercher une colonne contenant "http"
+            if not url_col:
+                for col in df.columns:
+                    if df[col].astype(str).str.contains('http').any():
+                        url_col = col
+                        break
+                        
+            if url_col:
+                urls += [str(x).strip() for x in df[url_col].dropna().tolist() if str(x).strip().startswith("http")]
+            else:
+                st.error("❌ Impossible de trouver une colonne avec des URLs dans le CSV.")
 
 # Dédoublonnage en gardant l'ordre STRICT d'apparition
 seen = set()
@@ -121,15 +135,12 @@ if st.button("🚀 Convertir", type="primary"):
                     response = session.get(url, timeout=15)
                     response.raise_for_status()
 
-                    # Nettoyage ultra robuste du nom de fichier (enlève ?t=... et remplace toute extension bizarre par .png)
                     raw_filename = url.split("/")[-1].split("?")[0] 
                     if not raw_filename: 
                         raw_filename = f"image_{i+1}"
                     
-                    # On retire l'extension d'origine (quelle qu'elle soit) et on force .png
                     name_png = re.sub(r'\.[a-zA-Z0-9]+$', '', raw_filename) + ".png"
                     
-                    # Conversion en mémoire (Force le mode RGBA pour la transparence puis RGB si pas nécessaire)
                     img = Image.open(BytesIO(response.content)).convert("RGBA")
                     
                     img_byte_arr = BytesIO()
@@ -189,11 +200,11 @@ if st.button("🚀 Convertir", type="primary"):
             )
 
         with col_dl2:
-            # On exporte le résultat avec des points-virgules pour que tu puisses le réouvrir facilement sur Excel en France/Maroc
-            csv_data = df_res.to_csv(index=False, sep=';').encode('utf-8')
+            # On exporte le résultat en utf-8 avec signature BOM pour qu'Excel l'ouvre bien sans casser les accents
+            csv_data = "\ufeff" + df_res.to_csv(index=False, sep=';')
             st.download_button(
                 label="📊 Télécharger la liste (CSV)",
-                data=csv_data,
+                data=csv_data.encode('utf-8'),
                 file_name="resultats_ordonnes.csv",
                 mime="text/csv",
                 use_container_width=True
