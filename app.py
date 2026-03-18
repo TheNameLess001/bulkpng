@@ -25,22 +25,25 @@ if upload_to_imgbb and not imgbb_api_key:
 # ------------------------------
 # 1) INPUT SECTION
 # ------------------------------
-st.title("📝 WEBP ➜ PNG (Export & ImgBB)")
-st.markdown("L'ordre d'entrée sera **strictement respecté** dans le fichier CSV final. Gère les CSV `;` ou `,` et les erreurs Excel.")
+st.title("📝 WEBP ➜ PNG (Modification du Fichier Source)")
+st.markdown("Uploade ton CSV : le script convertira les images et te renverra **ton fichier d'origine avec la colonne des liens mise à jour** !")
 
 col_input1, col_input2 = st.columns(2)
 
 with col_input1:
     urls_text = st.text_area(
-        "📌 Colle tes liens (1 par ligne)",
+        "📌 Colle tes liens (Optionnel, si tu n'as pas de CSV)",
         placeholder="https://site.com/img1.webp\nhttps://site.com/img2.webp",
         height=150
     )
 
 with col_input2:
-    uploaded_file = st.file_uploader("📁 Ou upload un fichier (.txt ou .csv)", type=["txt", "csv"])
+    uploaded_file = st.file_uploader("📁 Upload ton fichier source (.csv ou .txt)", type=["txt", "csv"])
 
 urls = []
+df_original = None     # Pour stocker le dataframe d'origine
+url_col_name = None    # Pour mémoriser le nom de la colonne à modifier
+is_csv_upload = False  # Pour savoir si on doit reconstituer un CSV à la fin
 
 # Extraction depuis le champ texte
 if urls_text.strip():
@@ -58,21 +61,18 @@ if uploaded_file is not None:
         
         for enc in encodings:
             try:
-                uploaded_file.seek(0) # Rembobine le fichier
-                # sep=None et engine='python' demandent à Pandas de deviner le séparateur TOUT SEUL
+                uploaded_file.seek(0)
                 df_temp = pd.read_csv(uploaded_file, encoding=enc, sep=None, engine='python')
                 df = df_temp
-                break # Si on arrive ici sans erreur, on a le bon format ! On sort de la boucle.
+                break 
             except (UnicodeDecodeError, pd.errors.ParserError, Exception):
-                continue # Si ça plante (encodage ou séparateur), on passe à la configuration suivante
+                continue 
                 
         if df is None:
-            # Plan B : Forcer le point-virgule et ignorer les lignes qui posent problème
             uploaded_file.seek(0)
             df = pd.read_csv(uploaded_file, encoding='utf-8', sep=';', on_bad_lines='skip')
             st.warning("⚠️ Certaines lignes mal formées ont dû être ignorées.")
 
-        # Chercher intelligemment la colonne contenant les images
         if df is not None:
             url_col = None
             for col in df.columns:
@@ -80,7 +80,6 @@ if uploaded_file is not None:
                     url_col = col
                     break
             
-            # Si pas de nom explicite, chercher une colonne contenant "http"
             if not url_col:
                 for col in df.columns:
                     if df[col].astype(str).str.contains('http').any():
@@ -88,11 +87,15 @@ if uploaded_file is not None:
                         break
                         
             if url_col:
+                # On sauvegarde les infos pour recréer le fichier à la fin
+                df_original = df.copy()
+                url_col_name = url_col
+                is_csv_upload = True
                 urls += [str(x).strip() for x in df[url_col].dropna().tolist() if str(x).strip().startswith("http")]
             else:
                 st.error("❌ Impossible de trouver une colonne avec des URLs dans le CSV.")
 
-# Dédoublonnage en gardant l'ordre STRICT d'apparition
+# Dédoublonnage
 seen = set()
 ordered_urls = []
 for u in urls:
@@ -110,6 +113,8 @@ if st.button("🚀 Convertir", type="primary"):
          st.error("❌ Impossible de lancer : La clé API ImgBB est requise pour l'hébergement.")
     else:
         results = []
+        url_mapping = {} # Dictionnaire magique pour remplacer les anciennes URLs par les nouvelles
+        
         progress_bar = st.progress(0)
         status_text = st.empty()
         
@@ -119,10 +124,7 @@ if st.button("🚀 Convertir", type="primary"):
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             for i, url in enumerate(ordered_urls):
                 row_data = {
-                    "Index": i + 1,
                     "URL Input": url,
-                    "Nom Fichier PNG": "",
-                    "URL ImgBB": "N/A",
                     "Statut": "En attente"
                 }
 
@@ -137,7 +139,6 @@ if st.button("🚀 Convertir", type="primary"):
                         raw_filename = f"image_{i+1}"
                     
                     name_png = re.sub(r'\.[a-zA-Z0-9]+$', '', raw_filename) + ".png"
-                    
                     img = Image.open(BytesIO(response.content)).convert("RGBA")
                     
                     img_byte_arr = BytesIO()
@@ -145,14 +146,10 @@ if st.button("🚀 Convertir", type="primary"):
                     img_bytes = img_byte_arr.getvalue()
                     
                     zip_file.writestr(name_png, img_bytes)
-                    
-                    row_data["Nom Fichier PNG"] = name_png
-                    row_data["Statut"] = "Succès local"
 
                     # Upload sur ImgBB
                     if upload_to_imgbb:
                         status_text.text(f"☁️ Upload ImgBB ({i+1}/{len(ordered_urls)}) : {name_png}")
-                        
                         b64_image = base64.b64encode(img_bytes).decode('utf-8')
                         payload = {
                             "key": imgbb_api_key,
@@ -165,13 +162,19 @@ if st.button("🚀 Convertir", type="primary"):
                         imgbb_data = imgbb_res.json()
                         
                         if imgbb_data.get("success"):
-                            row_data["URL ImgBB"] = imgbb_data["data"]["url"]
+                            new_link = imgbb_data["data"]["url"]
+                            url_mapping[url] = new_link # On associe l'ancien lien au nouveau
                             row_data["Statut"] = "Succès complet"
                         else:
-                            error_msg = imgbb_data.get('error', {}).get('message', 'Erreur API')
-                            row_data["Statut"] = f"Echec ImgBB: {error_msg}"
+                            url_mapping[url] = url # En cas d'échec, on garde l'ancien lien
+                            row_data["Statut"] = "Echec ImgBB"
+                    else:
+                        # Si pas d'upload ImgBB, on remplace le lien par le nom du fichier image (ex: image.png)
+                        url_mapping[url] = name_png 
+                        row_data["Statut"] = "Converti en local"
 
                 except Exception as e:
+                    url_mapping[url] = url # En cas d'erreur de téléchargement, on garde le lien d'origine intact
                     row_data["Statut"] = f"Erreur: {str(e)}"
 
                 results.append(row_data)
@@ -182,8 +185,6 @@ if st.button("🚀 Convertir", type="primary"):
         # ------------------------------
         # 3) RESULTATS & TELECHARGEMENT
         # ------------------------------
-        df_res = pd.DataFrame(results)
-
         st.markdown("---")
         col_dl1, col_dl2 = st.columns(2)
         
@@ -196,16 +197,35 @@ if st.button("🚀 Convertir", type="primary"):
                 use_container_width=True
             )
 
+        # Création du fichier CSV final à télécharger
+        if is_csv_upload and df_original is not None and url_col_name:
+            df_final = df_original.copy()
+            
+            # MAGIE : On remplace les vieilles URLs par les nouvelles grâce au dictionnaire
+            df_final[url_col_name] = df_final[url_col_name].apply(
+                lambda x: url_mapping.get(str(x).strip(), x) if pd.notnull(x) else x
+            )
+            
+            csv_data = "\ufeff" + df_final.to_csv(index=False, sep=';')
+            file_name = uploaded_file.name.replace(".csv", "_modifie.csv")
+            
+            st.success(f"🎉 Le fichier a été mis à jour ! La colonne '{url_col_name}' contient désormais les nouveaux liens.")
+            df_to_display = df_final
+            
+        else:
+            # Si l'utilisateur a juste collé du texte, on lui sort un tableau classique de résultats
+            df_to_display = pd.DataFrame(results)
+            csv_data = "\ufeff" + df_to_display.to_csv(index=False, sep=';')
+            file_name = "resultats_liens.csv"
+
         with col_dl2:
-            # Format export spécial Excel Français (BOM utf-8 + séparateur point-virgule)
-            csv_data = "\ufeff" + df_res.to_csv(index=False, sep=';')
             st.download_button(
-                label="📊 Télécharger la liste (CSV)",
+                label="📊 Télécharger le fichier CSV mis à jour",
                 data=csv_data.encode('utf-8'),
-                file_name="resultats_ordonnes.csv",
+                file_name=file_name,
                 mime="text/csv",
                 use_container_width=True
             )
 
-        st.write("### 🔍 Rapport détaillé de l'opération")
-        st.dataframe(df_res, use_container_width=True)
+        st.write("### 🔍 Aperçu du fichier de sortie")
+        st.dataframe(df_to_display, use_container_width=True)
